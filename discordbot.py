@@ -275,22 +275,25 @@ async def recu(
 
 
 # -------------------------------
-# /recu_info — Info sur tous les recus
+# /recu_info — Info sur tous les reçus
 # -------------------------------
 @bot.tree.command(description="Voir tous tes reçus")
 async def recu_info(interaction: discord.Interaction):
     async with bot.db.acquire() as conn:
         async with conn.cursor() as cur:
+            # Fetch receipts with their state
             await cur.execute("""
-                SELECT id, amount, description, created_at
+                SELECT id, amount, description, created_at, state
                 FROM factures
                 WHERE discord_id = %s
                 ORDER BY created_at DESC
             """, (interaction.user.id,))
             rows = await cur.fetchall()
 
+            # Calculate total only for accepted receipts
             await cur.execute("""
-                SELECT SUM(amount) FROM factures WHERE discord_id = %s
+                SELECT SUM(amount) FROM factures
+                WHERE discord_id = %s AND state = 'accepted'
             """, (interaction.user.id,))
             total = await cur.fetchone()
 
@@ -299,13 +302,21 @@ async def recu_info(interaction: discord.Interaction):
         return
 
     lines = [f"🧾 **Reçus de {interaction.user.display_name}**"]
-    for fid, amount, desc, created in rows:
-        lines.append(f"`#{fid}` {created:%Y-%m-%d} - {desc}: {amount:.2f} $")
-    lines.append(f"\n**Total dû**: `{total[0]:.2f} $`")
+    for fid, amount, desc, created, state in rows:
+        state_label = {
+            "pending": "🕐 En attente",
+            "accepted": "✅ Accepté",
+            "refused": "❌ Refusé"
+        }.get(state, "❓ Inconnu")
+
+        lines.append(f"`#{fid}` {created:%Y-%m-%d} - {desc}: {amount:.2f} $ [{state_label}]")
+
+    # Handle NULL total (if no accepted receipts)
+    total_amount = total[0] if total[0] is not None else 0.0
+    lines.append(f"\n**Total dû (acceptés)**: `{total_amount:.2f} $`")
 
     await interaction.response.send_message("\n".join(lines), ephemeral=True)
-
-
+    
 # -------------------------------
 # /recu_enleve - Enleve un recu
 # -------------------------------
