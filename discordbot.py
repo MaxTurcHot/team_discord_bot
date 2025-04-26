@@ -340,15 +340,23 @@ async def recu_enleve(interaction: discord.Interaction, id: int):
 # -------------------------------
 @bot.tree.command(description="📋 Voir tous les reçus (admin seulement)")
 async def recus_admin(interaction: discord.Interaction):
+    # ——— 1) Admin check ———
     if not await is_admin(interaction.user.id):
-        await interaction.response.defer(ephemeral=True)
+        await interaction.response.send_message("❌ Admin seulement.", ephemeral=True)
+        return
 
-    # 1. After defer, IMMEDIATELY send small message
-    await interaction.followup.send("⏳ Préparation du fichier des reçus, veuillez patienter...")
+    # ——— 2) Immediate ACK — no defer(), just a single send_message() ———
+    await interaction.response.send_message(
+        "⏳ Préparation du rapport des reçus, veuillez patienter…",
+        ephemeral=True
+    )
 
+    # ——— 3) Fetch data ———
     async with bot.db.acquire() as conn:
         async with conn.cursor() as cur:
-            await cur.execute("SELECT discord_id, first_name, last_name FROM users ORDER BY last_name, first_name")
+            await cur.execute(
+                "SELECT discord_id, first_name, last_name FROM users ORDER BY last_name, first_name"
+            )
             users = await cur.fetchall()
 
             await cur.execute("""
@@ -358,48 +366,54 @@ async def recus_admin(interaction: discord.Interaction):
             """)
             all_receipts = await cur.fetchall()
 
-    # Build the big text file
-    receipt_map = {}
+    # ——— 4) Build the text report ———
+    receipt_map: dict[int, list] = {}
     for rid, uid, amt, desc, created, state in all_receipts:
         receipt_map.setdefault(uid, []).append((rid, amt, desc, created, state))
 
-    output = io.StringIO()
-    output.write("🧾 Résumé des reçus par personne\n")
-    output.write("=" * 80 + "\n")
+    buf = io.StringIO()
+    buf.write("🧾 Résumé des reçus par personne\n")
+    buf.write("=" * 80 + "\n\n")
 
-    total_global = 0
+    total_global = 0.0
 
     for discord_id, first, last in users:
-        receipts = receipt_map.get(discord_id, [])
-        total_user = sum(amt for _, amt, _, _, state in receipts if state == "accepted")
+        recs = receipt_map.get(discord_id, [])
+        total_user = sum(amt for _, amt, *_ ,state in recs if state == "accepted")
         total_global += total_user
 
-        output.write(f"\n👤 {first} {last} — Total accepté: {total_user:.2f} $\n")
-        output.write("-" * 80 + "\n")
-        if receipts:
-            output.write(f"{'Date':<12} {'Description':<35} {'Montant':>10} {'État':>15}\n")
-            output.write("-" * 80 + "\n")
-            for rid, amt, desc, created, state in receipts:
-                date_str = created.strftime("%Y-%m-%d")
-                desc = (desc[:32] + "..") if len(desc) > 34 else desc
+        buf.write(f"👤 {first} {last} — Total accepté: {total_user:.2f} $\n")
+        buf.write("-" * 80 + "\n")
+        if recs:
+            buf.write(f"{'Date':<12} {'Description':<35} {'Montant':>10} {'État':>15}\n")
+            buf.write("-" * 80 + "\n")
+            for rid, amt, desc, created, state in recs:
+                date = created.strftime("%Y-%m-%d")
+                desc_short = desc if len(desc) <= 34 else desc[:32] + ".."
                 state_label = {
                     "pending": "🕐 En attente",
                     "accepted": "✅ Accepté",
                     "refused": "❌ Refusé"
-                }.get(state, "❓ Inconnu")
-                output.write(f"{date_str:<12} {desc:<35} {amt:>8.2f} {state_label:>15}\n")
+                }[state]
+                buf.write(f"{date:<12} {desc_short:<35} {amt:>8.2f} {state_label:>15}\n")
         else:
-            output.write("  Aucun reçu.\n")
+            buf.write("  _Aucun reçu._\n")
+        buf.write("\n")
 
-    output.write("\n" + "=" * 80 + "\n")
-    output.write(f"🧾 Total général accepté: {total_global:.2f} $\n")
+    buf.write("=" * 80 + "\n")
+    buf.write(f"🧾 Total général accepté: {total_global:.2f} $\n")
+    buf.seek(0)
 
-    # Prepare file
-    output.seek(0)
-    file = discord.File(fp=io.BytesIO(output.getvalue().encode()), filename="recus_admin.txt")
-
-    # 2. Now send file using regular CHANNEL message
-    await interaction.channel.send(content="📄 Voici le fichier des reçus :", file=file)
+    # ——— 5) Send back as a single follow-up (uses the same webhook) ———
+    file = discord.File(
+        io.BytesIO(buf.getvalue().encode("utf-8")),
+        filename="recus_admin.txt"
+    )
+    await interaction.followup.send(
+        content="📄 Voici le rapport complet des reçus :",
+        file=file,
+        ephemeral=True
+    )
 
 # -------------------------------
 # /update_tel - Update tel number
