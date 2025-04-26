@@ -12,8 +12,10 @@ import aiomysql
 from dotenv import load_dotenv
 import io
 from discord import File, Embed, Interaction, ButtonStyle
-import io
 from discord.ui import View, button
+
+
+
 
 # -------------------------------
 # Logging setup
@@ -444,13 +446,13 @@ async def validation(interaction: Interaction):
         await interaction.response.send_message("❌ Admin seulement.", ephemeral=True)
         return
 
-    # Allow command only in private DMs
-    if interaction.guild is not None:
-        await interaction.response.send_message("🔒 Cette commande est disponible uniquement en message privé.", ephemeral=True)
-        return
+    # Immediately defer the response to avoid timeout
+    await interaction.response.defer(ephemeral=True)
 
-    await interaction.response.send_message("🔄 Chargement des reçus en attente...")
+    # Open a DM channel explicitly after deferring
+    dm_channel = interaction.user.dm_channel or await interaction.user.create_dm()
 
+    # Fetch pending receipts from DB
     async with bot.db.acquire() as conn:
         async with conn.cursor() as cur:
             await cur.execute(
@@ -459,15 +461,18 @@ async def validation(interaction: Interaction):
             pending = await cur.fetchall()
 
     if not pending:
-        await interaction.followup.send("✅ Aucun reçu en attente.")
+        await dm_channel.send("✅ Aucun reçu en attente.")
+        await interaction.followup.send("📬 Aucun reçu en attente. Vérifiez vos DM.", ephemeral=True)
         return
+
+    await interaction.followup.send("📬 Validation commencée dans vos messages privés.", ephemeral=True)
 
     for rec in pending:
         rec_id = rec[0]
         embed, file = await build_embed_and_file(rec)
         view = ValidationView(rec_id)
 
-        message = await interaction.followup.send(embed=embed, file=file, view=view)
+        message = await dm_channel.send(embed=embed, file=file, view=view)
 
         await view.wait()
 
@@ -492,7 +497,7 @@ async def validation(interaction: Interaction):
             await message.edit(content=f"⏰ Timeout sur reçu #{rec_id}, validation arrêtée.", embed=None, attachments=[], view=None)
             break
 
-    await interaction.followup.send("🎉 Validation terminée.")
+    await dm_channel.send("🎉 Validation terminée.")
 
 # -------------------------------
 # Main entry point
