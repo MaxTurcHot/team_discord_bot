@@ -341,8 +341,7 @@ async def recu_enleve(interaction: discord.Interaction, id: int):
 @bot.tree.command(description="📋 Voir tous les reçus (admin seulement)")
 async def recus_admin(interaction: discord.Interaction):
     if not await is_admin(interaction.user.id):
-        await interaction.response.send_message("❌ Admin seulement.", ephemeral=True)
-        return
+        await interaction.response.defer(ephemeral=True)
 
     async with bot.db.acquire() as conn:
         async with conn.cursor() as cur:
@@ -350,7 +349,7 @@ async def recus_admin(interaction: discord.Interaction):
             await cur.execute("SELECT discord_id, first_name, last_name FROM users ORDER BY last_name, first_name")
             users = await cur.fetchall()
 
-            # Fetch all receipts (with state)
+            # Fetch all receipts
             await cur.execute("""
                 SELECT id, discord_id, amount, description, created_at, state
                 FROM factures
@@ -363,31 +362,42 @@ async def recus_admin(interaction: discord.Interaction):
     for rid, uid, amt, desc, created, state in all_receipts:
         receipt_map.setdefault(uid, []).append((rid, amt, desc, created, state))
 
-    lines = ["🧾 **Résumé des reçus par personne :**"]
+    output = io.StringIO()
+    output.write("🧾 Résumé des reçus par personne\n")
+    output.write("=" * 80 + "\n")
+
     total_global = 0
 
     for discord_id, first, last in users:
         receipts = receipt_map.get(discord_id, [])
-
-        # Only sum amounts where the receipt is accepted
         total_user = sum(amt for _, amt, _, _, state in receipts if state == "accepted")
         total_global += total_user
 
-        lines.append(f"\n👤 **{first} {last}** — Total accepté: `{total_user:.2f} $`")
-
+        output.write(f"\n👤 {first} {last} — Total accepté: {total_user:.2f} $\n")
+        output.write("-" * 80 + "\n")
         if receipts:
+            output.write(f"{'Date':<12} {'Description':<35} {'Montant':>10} {'État':>15}\n")
+            output.write("-" * 80 + "\n")
             for rid, amt, desc, created, state in receipts:
+                date_str = created.strftime("%Y-%m-%d")
+                desc = (desc[:32] + "..") if len(desc) > 34 else desc  # Truncate long desc
                 state_label = {
                     "pending": "🕐 En attente",
                     "accepted": "✅ Accepté",
                     "refused": "❌ Refusé"
                 }.get(state, "❓ Inconnu")
-                lines.append(f"  • `{created.strftime('%Y-%m-%d')}` - {desc}: `{amt:.2f} $` [{state_label}]")
+                output.write(f"{date_str:<12} {desc:<35} {amt:>8.2f} {state_label:>15}\n")
         else:
-            lines.append("  _Aucun reçu._")
+            output.write("  Aucun reçu.\n")
 
-    lines.append(f"\n🧾 **Total général accepté: `{total_global:.2f} $`**")
-    await interaction.response.send_message("\n".join(lines), ephemeral=True)
+    output.write("\n" + "=" * 80 + "\n")
+    output.write(f"🧾 Total général accepté: {total_global:.2f} $\n")
+
+    # Prepare file to send
+    output.seek(0)
+    file = discord.File(fp=io.BytesIO(output.getvalue().encode()), filename="reçus_admin.txt")
+
+    await interaction.followup.send(content="📄 Voici le résumé des reçus :", file=file)
 
 
 # -------------------------------
