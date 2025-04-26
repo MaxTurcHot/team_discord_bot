@@ -597,14 +597,30 @@ async def validation(interaction: Interaction):
 
             await view.wait()
 
-            if view.choice == "accepted" or view.choice == "refused":
+            if view.choice in ("accepted", "refused"):
+                # 1) Update the DB
                 async with bot.db.acquire() as conn:
                     async with conn.cursor() as cur:
                         await cur.execute(
                             "UPDATE factures SET state=%s WHERE id=%s",
                             (view.choice, rec_id)
                         )
-                await message.edit(content=f"✅ Reçu #{rec_id} **{view.choice.upper()}**", embed=None, attachments=[], view=None)
+
+                # 2) Notify the user who submitted the receipt
+                owner_id = rec[1]  # discord_id was the second field in your SELECT
+                try:
+                    user = await bot.fetch_user(owner_id)
+                    await user.send(
+                        f"🧾 Votre reçu **#{rec_id}** a été **{view.choice.upper()}**. Si vous croyez qu'il y a erreur, contactez un membre du CA."
+                    )
+                except Exception as e:
+                    logger.error(f"Impossible d'envoyer la notification à {owner_id}: {e}")
+
+                # 3) Edit the admin’s DM to reflect the change
+                await message.edit(
+                    content=f"✅ Reçu #{rec_id} **{view.choice.upper()}**",
+                    embed=None, attachments=[], view=None
+                )
 
             elif view.choice == "skip":
                 await message.edit(content=f"⏩ Reçu #{rec_id} ignoré (pour l'instant).", embed=None, attachments=[], view=None)
