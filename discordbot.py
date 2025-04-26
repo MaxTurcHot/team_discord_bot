@@ -14,6 +14,7 @@ import io
 from discord import File, Embed, Interaction, ButtonStyle
 from discord.ui import View, button
 import logging
+import decimal
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -382,7 +383,7 @@ async def recus_admin(interaction: discord.Interaction):
         recs = receipt_map.get(discord_id, [])
         # sum only accepted receipts (amt is Decimal)
         total_user = sum(
-            (amt for _, amt, *_ in recs if _[4] == "accepted"),  # unpack state
+            (amount for (_id, amount, _desc, _created, state) in recs if state == "accepted"),
             decimal.Decimal("0")
         )
         total_global += total_user
