@@ -316,7 +316,7 @@ async def recu_info(interaction: discord.Interaction):
     lines.append(f"\n**Total dû (acceptés)**: `{total_amount:.2f} $`")
 
     await interaction.response.send_message("\n".join(lines), ephemeral=True)
-    
+
 # -------------------------------
 # /recu_enleve - Enleve un recu
 # -------------------------------
@@ -334,8 +334,9 @@ async def recu_enleve(interaction: discord.Interaction, id: int):
 
     await interaction.response.send_message("🗑️ Reçu supprimée avec succès.", ephemeral=True)
 
+
 # -------------------------------
-# /recus_admin - Voir toutes les factures
+# /recus_admin - Voir tous les reçus (admin seulement)
 # -------------------------------
 @bot.tree.command(description="📋 Voir tous les reçus (admin seulement)")
 async def recus_admin(interaction: discord.Interaction):
@@ -349,33 +350,45 @@ async def recus_admin(interaction: discord.Interaction):
             await cur.execute("SELECT discord_id, first_name, last_name FROM users ORDER BY last_name, first_name")
             users = await cur.fetchall()
 
-            # Fetch all receipts
-            await cur.execute("SELECT id, discord_id, amount, description, created_at FROM factures ORDER BY created_at ASC")
+            # Fetch all receipts (with state)
+            await cur.execute("""
+                SELECT id, discord_id, amount, description, created_at, state
+                FROM factures
+                ORDER BY created_at ASC
+            """)
             all_receipts = await cur.fetchall()
 
     # Organize receipts by user
     receipt_map = {}
-    for rid, uid, amt, desc, created in all_receipts:
-        receipt_map.setdefault(uid, []).append((rid, amt, desc, created))
+    for rid, uid, amt, desc, created, state in all_receipts:
+        receipt_map.setdefault(uid, []).append((rid, amt, desc, created, state))
 
     lines = ["🧾 **Résumé des reçus par personne :**"]
     total_global = 0
 
     for discord_id, first, last in users:
         receipts = receipt_map.get(discord_id, [])
-        total_user = sum(r[1] for r in receipts)
+
+        # Only sum amounts where the receipt is accepted
+        total_user = sum(amt for _, amt, _, _, state in receipts if state == "accepted")
         total_global += total_user
 
-        lines.append(f"\n👤 **{first} {last}** — Total: `{total_user:.2f} $`")
+        lines.append(f"\n👤 **{first} {last}** — Total accepté: `{total_user:.2f} $`")
 
         if receipts:
-            for rid, amt, desc, created in receipts:
-                lines.append(f"  • `{created.strftime('%Y-%m-%d')}` - {desc}: `{amt:.2f} $`")
+            for rid, amt, desc, created, state in receipts:
+                state_label = {
+                    "pending": "🕐 En attente",
+                    "accepted": "✅ Accepté",
+                    "refused": "❌ Refusé"
+                }.get(state, "❓ Inconnu")
+                lines.append(f"  • `{created.strftime('%Y-%m-%d')}` - {desc}: `{amt:.2f} $` [{state_label}]")
         else:
             lines.append("  _Aucun reçu._")
 
-    lines.append(f"\n🧾 **Total général: `{total_global:.2f} $`**")
+    lines.append(f"\n🧾 **Total général accepté: `{total_global:.2f} $`**")
     await interaction.response.send_message("\n".join(lines), ephemeral=True)
+
 
 # -------------------------------
 # /update_tel - Update tel number
