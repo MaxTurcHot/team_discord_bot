@@ -343,7 +343,7 @@ async def recus_admin(interaction: discord.Interaction):
     if not await is_admin(interaction.user.id):
         await interaction.response.defer(ephemeral=True)
 
-    # Send quick interim message to avoid webhook timeout
+    # 1. After defer, IMMEDIATELY send small message
     await interaction.followup.send("⏳ Préparation du fichier des reçus, veuillez patienter...")
 
     async with bot.db.acquire() as conn:
@@ -358,6 +358,7 @@ async def recus_admin(interaction: discord.Interaction):
             """)
             all_receipts = await cur.fetchall()
 
+    # Build the big text file
     receipt_map = {}
     for rid, uid, amt, desc, created, state in all_receipts:
         receipt_map.setdefault(uid, []).append((rid, amt, desc, created, state))
@@ -397,8 +398,8 @@ async def recus_admin(interaction: discord.Interaction):
     output.seek(0)
     file = discord.File(fp=io.BytesIO(output.getvalue().encode()), filename="recus_admin.txt")
 
-    # Now send the file after the small interim message
-    await interaction.followup.send(content="📄 Voici le fichier des reçus :", file=file)
+    # 2. Now send file using regular CHANNEL message
+    await interaction.channel.send(content="📄 Voici le fichier des reçus :", file=file)
 
 # -------------------------------
 # /update_tel - Update tel number
