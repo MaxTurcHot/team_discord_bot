@@ -305,7 +305,7 @@ async def recu_info(interaction: discord.Interaction):
     lines = [f"🧾 **Reçus de {interaction.user.display_name}**"]
     for fid, amount, desc, created, state in rows:
         state_label = {
-            "pending": "🕐 En attente",
+            "pending": "🕐 Pending",
             "accepted": "✅ Accepté",
             "refused": "❌ Refusé"
         }.get(state, "❓ Inconnu")
@@ -314,7 +314,7 @@ async def recu_info(interaction: discord.Interaction):
 
     # Handle NULL total (if no accepted receipts)
     total_amount = total[0] if total[0] is not None else 0.0
-    lines.append(f"\n**Total dû (acceptés)**: `{total_amount:.2f} $`")
+    lines.append(f"\n**Total dû**: `{total_amount:.2f} $`")
 
     await interaction.response.send_message("\n".join(lines), ephemeral=True)
 
@@ -371,7 +371,7 @@ async def recu_inspect(interaction: discord.Interaction, id: int):
 
     # Ajouter le champ État
     state_labels = {
-        "pending": "🕐 En attente",
+        "pending": "🕐 Pending",
         "accepted": "✅ Accepté",
         "refused": "❌ Refusé"
     }
@@ -443,13 +443,13 @@ async def recus_admin(interaction: discord.Interaction):
         buf.write(f"👤 {first} {last} — Total accepté: {total_user:.2f} $\n")
         buf.write("-" * 80 + "\n")
         if recs:
-            buf.write(f" {'id':>3} {'Date':<12} {'Description':<35} {'Montant':>10} {'État':>15}\n")
+            buf.write(f"{'Id':<3}  {'Date':<12} {'Description':<35} {'Montant':>10} {'État':>15}\n")
             buf.write("-" * 80 + "\n")
             for rid, amt, desc, created, state in recs:
                 date = created.strftime("%Y-%m-%d")
                 desc_short = desc if len(desc) <= 34 else desc[:32] + ".."
                 emoji_state = {
-                    "pending": "🕐 En attente",
+                    "pending": "🕐 Pending",
                     "accepted": "✅ Accepté",
                     "refused": "❌ Refusé"
                 }[state]
@@ -459,7 +459,7 @@ async def recus_admin(interaction: discord.Interaction):
         buf.write("\n")
 
     buf.write("=" * 80 + "\n")
-    buf.write(f"🧾 Total général accepté: {total_global:.2f} $\n")
+    buf.write(f"🧾 Total général: {total_global:.2f} $\n")
     buf.seek(0)
 
     # 6) Send the completed report as a file
