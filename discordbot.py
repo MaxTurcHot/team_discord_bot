@@ -11,7 +11,7 @@ from discord.ext import commands
 import aiomysql
 from dotenv import load_dotenv
 import io
-from discord import File, Embed, ButtonStyle
+from discord import File, Embed, Interaction, ButtonStyle
 import io
 from discord.ui import View, button
 
@@ -390,119 +390,107 @@ async def update_mail(interaction: discord.Interaction, mail: str):
         f"✅ Ton adresse email a été mise à jour: `{mail}`", ephemeral=True
     )
 
-# — helper to build embed+file for one receipt —
-async def build_recu_embed_and_file(rec):
+class ValidationView(View):
+    def __init__(self, recu_id):
+        super().__init__(timeout=300)
+        self.choice = None
+        self.recu_id = recu_id
+
+    @button(label="Accepter", style=ButtonStyle.success)
+    async def accept(self, interaction: Interaction, button):
+        self.choice = "accepted"
+        self.stop()
+
+    @button(label="Refuser", style=ButtonStyle.danger)
+    async def refuse(self, interaction: Interaction, button):
+        self.choice = "refused"
+        self.stop()
+
+    @button(label="Skip", style=ButtonStyle.secondary)
+    async def skip(self, interaction: Interaction, button):
+        self.choice = "skip"
+        self.stop()
+
+    @button(label="End", style=ButtonStyle.secondary)
+    async def end(self, interaction: Interaction, button):
+        self.choice = "end"
+        self.stop()
+
+async def build_embed_and_file(rec):
     rec_id, user_id, amount, description, created = rec
-    # fetch image_blob
     async with bot.db.acquire() as conn:
         async with conn.cursor() as cur:
-            await cur.execute("SELECT image_blob FROM factures WHERE id = %s", (rec_id,))
+            await cur.execute("SELECT image_blob FROM factures WHERE id=%s", (rec_id,))
             row = await cur.fetchone()
-    embed = Embed(
-        title=f"Reçu #{rec_id}",
-        description=description,
-        timestamp=created
-    )
-    embed.add_field("Montant", f"{amount:.2f} $", inline=True)
-    embed.add_field("Par", f"<@{user_id}>", inline=True)
-    files = []
+
+    embed = Embed(title=f"Reçu #{rec_id}", description=description, timestamp=created)
+    embed.add_field(name="Montant", value=f"{amount:.2f} $", inline=True)
+    embed.add_field(name="Par", value=f"<@{user_id}>", inline=True)
+
+    file = None
     if row and row[0]:
-        bio = io.BytesIO(row[0])
-        files.append(File(bio, filename=f"recu_{rec_id}.jpg"))
+        img_bytes = row[0]
+        file = File(io.BytesIO(img_bytes), filename=f"recu_{rec_id}.jpg")
         embed.set_image(url=f"attachment://recu_{rec_id}.jpg")
-    return embed, files
 
-@bot.tree.command(
-    name="validation",
-    description="Valider les reçus en attente (admin seulement)"
-)
-async def validation(interaction):
+    return embed, file
+
+@bot.tree.command(name="validation", description="Valider les reçus en attente (admin seulement)")
+async def validation(interaction: Interaction):
     if not await is_admin(interaction.user.id):
-        return await interaction.response.send_message("❌ Admin seulement.", ephemeral=True)
+        await interaction.response.send_message("❌ Admin seulement.", ephemeral=True)
+        return
 
-    # 1) load pending
+    # Allow command only in private DMs
+    if interaction.guild is not None:
+        await interaction.response.send_message("🔒 Cette commande est disponible uniquement en message privé.", ephemeral=True)
+        return
+
+    await interaction.response.send_message("🔄 Chargement des reçus en attente...")
+
     async with bot.db.acquire() as conn:
         async with conn.cursor() as cur:
             await cur.execute(
-                "SELECT id, discord_id, amount, description, created_at "
-                "FROM factures WHERE state='pending' ORDER BY created_at"
+                "SELECT id, discord_id, amount, description, created_at FROM factures WHERE state='pending' ORDER BY created_at"
             )
             pending = await cur.fetchall()
 
     if not pending:
-        return await interaction.response.send_message(
-            "✅ Pas de reçus en attente.", ephemeral=True
-        )
+        await interaction.followup.send("✅ Aucun reçu en attente.")
+        return
 
-    # 2) ACK start
-    await interaction.response.send_message(
-        f"🚀 Démarrage de la validation de {len(pending)} reçus…",
-        ephemeral=True
-    )
-
-    # 3) loop through receipts
     for rec in pending:
         rec_id = rec[0]
-        embed, files = await build_recu_embed_and_file(rec)
+        embed, file = await build_embed_and_file(rec)
+        view = ValidationView(rec_id)
 
-        # prepare buttons
-        view = View(timeout=300)
-        view.add_item(Button(label="Accepter", style=discord.ButtonStyle.success, custom_id=f"accept:{rec_id}"))
-        view.add_item(Button(label="Refuser",  style=discord.ButtonStyle.danger,  custom_id=f"refuse:{rec_id}"))
-        view.add_item(Button(label="Skip",    style=discord.ButtonStyle.secondary, custom_id=f"skip:{rec_id}"))
-        view.add_item(Button(label="End",     style=discord.ButtonStyle.secondary, custom_id=f"end:{rec_id}"))
+        message = await interaction.followup.send(embed=embed, file=file, view=view)
 
-        # send this receipt
-        msg = await interaction.followup.send(
-            embed=embed,
-            files=files,
-            view=view,
-            ephemeral=True
-        )
+        await view.wait()
 
-        # wait for button press
-        def check(i):
-            return (
-                i.user.id == interaction.user.id
-                and i.message.id == msg.id
-            )
-        try:
-            btn_int = await bot.wait_for("interaction", check=check, timeout=300)
-        except asyncio.TimeoutError:
-            await interaction.followup.send(
-                f"⏰ Timeout sur reçu #{rec_id}, passage au suivant.",
-                ephemeral=True
-            )
-            continue
-
-        # parse choice
-        choice, rid_s = btn_int.data["custom_id"].split(":")
-        rid = int(rid_s)
-
-        # update DB
-        if choice in ("accept", "refuse"):
-            new_state = "accepted" if choice=="accept" else "refused"
+        if view.choice == "accepted" or view.choice == "refused":
             async with bot.db.acquire() as conn:
                 async with conn.cursor() as cur:
                     await cur.execute(
                         "UPDATE factures SET state=%s WHERE id=%s",
-                        (new_state, rid)
+                        (view.choice, rec_id)
                     )
+            await message.edit(content=f"✅ Reçu #{rec_id} **{view.choice.upper()}**", embed=None, attachments=[], view=None)
 
-        # edit the receipt message to show the outcome
-        await btn_int.response.edit_message(
-            content=f"✅ Reçu #{rid} **{choice.upper()}**",
-            embed=None,
-            view=None,
-            attachments=[]
-        )
+        elif view.choice == "skip":
+            await message.edit(content=f"⏩ Reçu #{rec_id} ignoré (pour l'instant).", embed=None, attachments=[], view=None)
+            continue
 
-        # break on end
-        if choice == "end":
+        elif view.choice == "end":
+            await message.edit(content=f"❌ Validation interrompue au reçu #{rec_id}.", embed=None, attachments=[], view=None)
             break
 
-    # 4) wrap up
-    await interaction.followup.send("🎉 Validation terminée.", ephemeral=True)
+        else:
+            await message.edit(content=f"⏰ Timeout sur reçu #{rec_id}, validation arrêtée.", embed=None, attachments=[], view=None)
+            break
+
+    await interaction.followup.send("🎉 Validation terminée.")
+
 # -------------------------------
 # Main entry point
 # -------------------------------
