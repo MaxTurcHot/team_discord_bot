@@ -340,18 +340,18 @@ async def recu_enleve(interaction: discord.Interaction, id: int):
 # -------------------------------
 @bot.tree.command(description="📋 Voir tous les reçus (admin seulement)")
 async def recus_admin(interaction: discord.Interaction):
-    # ——— 1) Admin check ———
+    # 1) Admin check
     if not await is_admin(interaction.user.id):
         await interaction.response.send_message("❌ Admin seulement.", ephemeral=True)
         return
 
-    # ——— 2) Immediate ACK — no defer(), just a single send_message() ———
+    # 2) Immediate acknowledgement
     await interaction.response.send_message(
         "⏳ Préparation du rapport des reçus, veuillez patienter…",
         ephemeral=True
     )
 
-    # ——— 3) Fetch data ———
+    # 3) Fetch users + receipts
     async with bot.db.acquire() as conn:
         async with conn.cursor() as cur:
             await cur.execute(
@@ -366,20 +366,25 @@ async def recus_admin(interaction: discord.Interaction):
             """)
             all_receipts = await cur.fetchall()
 
-    # ——— 4) Build the text report ———
+    # 4) Organize receipts per user
     receipt_map: dict[int, list] = {}
     for rid, uid, amt, desc, created, state in all_receipts:
         receipt_map.setdefault(uid, []).append((rid, amt, desc, created, state))
 
+    # 5) Build the report in-memory
     buf = io.StringIO()
     buf.write("🧾 Résumé des reçus par personne\n")
     buf.write("=" * 80 + "\n\n")
 
-    total_global = 0.0
+    total_global = decimal.Decimal("0")
 
     for discord_id, first, last in users:
         recs = receipt_map.get(discord_id, [])
-        total_user = sum(amt for _, amt, *_ ,state in recs if state == "accepted")
+        # sum only accepted receipts (amt is Decimal)
+        total_user = sum(
+            (amt for _, amt, *_ in recs if _[4] == "accepted"),  # unpack state
+            decimal.Decimal("0")
+        )
         total_global += total_user
 
         buf.write(f"👤 {first} {last} — Total accepté: {total_user:.2f} $\n")
@@ -390,12 +395,12 @@ async def recus_admin(interaction: discord.Interaction):
             for rid, amt, desc, created, state in recs:
                 date = created.strftime("%Y-%m-%d")
                 desc_short = desc if len(desc) <= 34 else desc[:32] + ".."
-                state_label = {
+                emoji_state = {
                     "pending": "🕐 En attente",
                     "accepted": "✅ Accepté",
                     "refused": "❌ Refusé"
                 }[state]
-                buf.write(f"{date:<12} {desc_short:<35} {amt:>8.2f} {state_label:>15}\n")
+                buf.write(f"{date:<12} {desc_short:<35} {amt:>8.2f} {emoji_state:>15}\n")
         else:
             buf.write("  _Aucun reçu._\n")
         buf.write("\n")
@@ -404,7 +409,7 @@ async def recus_admin(interaction: discord.Interaction):
     buf.write(f"🧾 Total général accepté: {total_global:.2f} $\n")
     buf.seek(0)
 
-    # ——— 5) Send back as a single follow-up (uses the same webhook) ———
+    # 6) Send the completed report as a file
     file = discord.File(
         io.BytesIO(buf.getvalue().encode("utf-8")),
         filename="recus_admin.txt"
