@@ -431,7 +431,7 @@ async def recus_admin(interaction: discord.Interaction):
 
     total_global = decimal.Decimal("0")
 
-    for rid, discord_id, first, last in users:
+    for discord_id, first, last in users:
         recs = receipt_map.get(discord_id, [])
         # sum only accepted receipts (amt is Decimal)
         total_user = sum(
@@ -443,7 +443,7 @@ async def recus_admin(interaction: discord.Interaction):
         buf.write(f"👤 {first} {last} — Total accepté: {total_user:.2f} $\n")
         buf.write("-" * 80 + "\n")
         if recs:
-            buf.write(f"`#{rid}` {'Date':<12} {'Description':<35} {'Montant':>10} {'État':>15}\n")
+            buf.write(f"{'Date':<12} {'Description':<35} {'Montant':>10} {'État':>15}\n")
             buf.write("-" * 80 + "\n")
             for rid, amt, desc, created, state in recs:
                 date = created.strftime("%Y-%m-%d")
@@ -453,7 +453,7 @@ async def recus_admin(interaction: discord.Interaction):
                     "accepted": "✅ Accepté",
                     "refused": "❌ Refusé"
                 }[state]
-                buf.write(f"{date:<12} {desc_short:<35} {amt:>8.2f} {emoji_state:>15}\n")
+                buf.write(f"`#{rid}` {date:<12} {desc_short:<35} {amt:>8.2f} {emoji_state:>15}\n")
         else:
             buf.write("  _Aucun reçu._\n")
         buf.write("\n")
