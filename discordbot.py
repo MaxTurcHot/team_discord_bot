@@ -453,7 +453,7 @@ async def recus_admin(interaction: discord.Interaction):
                     "accepted": "✅ Accepté",
                     "refused": "❌ Refusé"
                 }[state]
-                buf.write(f"#{rid:>3i} {date:<12} {desc_short:<35} {amt:>8.2f} {emoji_state:>15}\n")
+                buf.write(f"#{rid:<3d} {date:<12} {desc_short:<35} {amt:>8.2f} {emoji_state:>15}\n")
         else:
             buf.write("  _Aucun reçu._\n")
         buf.write("\n")
