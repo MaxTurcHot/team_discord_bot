@@ -408,21 +408,25 @@ class ValidationView(View):
     @button(label="Accepter", style=ButtonStyle.success)
     async def accept(self, interaction: Interaction, button):
         self.choice = "accepted"
+        await interaction.response.defer()
         self.stop()
 
     @button(label="Refuser", style=ButtonStyle.danger)
     async def refuse(self, interaction: Interaction, button):
         self.choice = "refused"
+        await interaction.response.defer()
         self.stop()
 
     @button(label="Skip", style=ButtonStyle.secondary)
     async def skip(self, interaction: Interaction, button):
         self.choice = "skip"
+        await interaction.response.defer()
         self.stop()
 
     @button(label="End", style=ButtonStyle.secondary)
     async def end(self, interaction: Interaction, button):
         self.choice = "end"
+        await interaction.response.defer()
         self.stop()
 
 async def build_embed_and_file(rec):
@@ -444,29 +448,23 @@ async def build_embed_and_file(rec):
 
     return embed, file
 
-
 @bot.tree.command(name="validation", description="Valider les reçus en attente (admin seulement)")
 async def validation(interaction: Interaction):
     logger.debug("Validation command invoked.")
     try:
-        await interaction.response.defer()
-        logger.debug("Interaction deferred.")
-        # Your command logic here
+        # Check admin permission first
         if not await is_admin(interaction.user.id):
-            await interaction.response.send_message("❌ Admin seulement.")
+            await interaction.response.send_message("❌ Admin seulement.", ephemeral=True)
             return
 
-        # Immediately acknowledge correctly based on channel type
+        # Now defer once properly
+        await interaction.response.defer(thinking=True)
+
+        # Decide where to send messages
         if interaction.guild is None:
-            # DM channel: No ephemeral allowed
-            await interaction.response.send_message("🔄 Chargement des reçus en attente dans ce message privé...")
-            response_func = interaction.followup.send
-            channel = interaction.channel
+            channel = interaction.channel  # DM channel
         else:
-            # Server channel: ephemeral is fine
-            await interaction.response.defer(ephemeral=True)
-            response_func = interaction.followup.send
-            channel = interaction.channel
+            channel = interaction.channel  # Server channel
 
         async with bot.db.acquire() as conn:
             async with conn.cursor() as cur:
@@ -476,7 +474,7 @@ async def validation(interaction: Interaction):
                 pending = await cur.fetchall()
 
         if not pending:
-            await response_func("✅ Aucun reçu en attente.")
+            await interaction.followup.send("✅ Aucun reçu en attente.")
             return
 
         for rec in pending:
@@ -495,31 +493,29 @@ async def validation(interaction: Interaction):
                             "UPDATE factures SET state=%s WHERE id=%s",
                             (view.choice, rec_id)
                         )
-                await message.edit(content=f"✅ Reçu #{rec_id} **{view.choice.upper()}**", embed=None, attachments=[],
-                                   view=None)
+                await message.edit(content=f"✅ Reçu #{rec_id} **{view.choice.upper()}**", embed=None, attachments=[], view=None)
 
             elif view.choice == "skip":
-                await message.edit(content=f"⏩ Reçu #{rec_id} ignoré (pour l'instant).", embed=None, attachments=[],
-                                   view=None)
+                await message.edit(content=f"⏩ Reçu #{rec_id} ignoré (pour l'instant).", embed=None, attachments=[], view=None)
                 continue
 
             elif view.choice == "end":
-                await message.edit(content=f"❌ Validation interrompue au reçu #{rec_id}.", embed=None, attachments=[],
-                                   view=None)
+                await message.edit(content=f"❌ Validation interrompue au reçu #{rec_id}.", embed=None, attachments=[], view=None)
                 break
 
             else:
-                await message.edit(content=f"⏰ Timeout sur reçu #{rec_id}, validation arrêtée.", embed=None,
-                                   attachments=[], view=None)
+                await message.edit(content=f"⏰ Timeout sur reçu #{rec_id}, validation arrêtée.", embed=None, attachments=[], view=None)
                 break
 
-        await channel.send("🎉 Validation terminée.")
-        await interaction.followup.send("Processing complete.")
+        await interaction.followup.send("🎉 Validation terminée.", ephemeral=True)
         logger.debug("Follow-up message sent.")
+
     except Exception as e:
         logger.error(f"An error occurred: {e}")
-        await interaction.followup.send("An error occurred while processing your request.")
-
+        try:
+            await interaction.followup.send("❌ Une erreur est survenue pendant la validation.", ephemeral=True)
+        except Exception as e2:
+            logger.error(f"Even followup failed: {e2}")
 
 
 # -------------------------------
