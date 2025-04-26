@@ -10,6 +10,8 @@ import discord
 from discord.ext import commands
 import aiomysql
 from dotenv import load_dotenv
+import io
+from discord import File, Embed
 
 # -------------------------------
 # Logging setup
@@ -386,6 +388,120 @@ async def update_mail(interaction: discord.Interaction, mail: str):
         f"✅ Ton adresse email a été mise à jour: `{mail}`", ephemeral=True
     )
 
+class ValidationView(discord.ui.View):
+    def __init__(self, interaction: discord.Interaction, receipts: list):
+        super().__init__(timeout=None)
+        self.interaction = interaction
+        self.receipts = receipts
+        self.index = 0
+        self.message: discord.Message | None = None
+
+    async def send_current(self):
+        rec_id, user_id, amount, description, created = self.receipts[self.index]
+
+        # fetch the image blob
+        async with bot.db.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT image_blob FROM factures WHERE id = %s", (rec_id,)
+                )
+                row = await cur.fetchone()
+        img_bytes = row[0] if row else None
+
+        # build embed
+        embed = Embed(
+            title=f"Reçu #{rec_id}",
+            description=description,
+            timestamp=created
+        )
+        embed.add_field(name="Montant", value=f"{amount:.2f} $")
+        embed.add_field(name="Par", value=f"<@{user_id}>")
+
+        files = []
+        if img_bytes:
+            fp = io.BytesIO(img_bytes)
+            file = File(fp, filename=f"recu_{rec_id}.jpg")
+            embed.set_image(url=f"attachment://recu_{rec_id}.jpg")
+            files = [file]
+
+        if not self.message:
+            # first send
+            self.message = await self.interaction.response.send_message(
+                embed=embed, files=files, view=self, ephemeral=True
+            )
+        else:
+            # edit existing
+            await self.message.edit(embed=embed, attachments=files, view=self)
+
+    @discord.ui.button(label="Accepter", style=discord.ButtonStyle.success)
+    async def accept(self, button: discord.ui.Button, interaction: discord.Interaction):
+        rec_id = self.receipts[self.index][0]
+        async with bot.db.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "UPDATE factures SET state = 'accepted' WHERE id = %s", (rec_id,)
+                )
+        await interaction.response.defer()
+        self.index += 1
+        if self.index < len(self.receipts):
+            await self.send_current()
+        else:
+            await interaction.followup.send("✅ Tous les reçus ont été traités.", ephemeral=True)
+            self.stop()
+
+    @discord.ui.button(label="Refuser", style=discord.ButtonStyle.danger)
+    async def refuse(self, button: discord.ui.Button, interaction: discord.Interaction):
+        rec_id = self.receipts[self.index][0]
+        async with bot.db.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "UPDATE factures SET state = 'refused' WHERE id = %s", (rec_id,)
+                )
+        await interaction.response.defer()
+        self.index += 1
+        if self.index < len(self.receipts):
+            await self.send_current()
+        else:
+            await interaction.followup.send("✅ Tous les reçus ont été traités.", ephemeral=True)
+            self.stop()
+
+    @discord.ui.button(label="Skip", style=discord.ButtonStyle.secondary)
+    async def skip(self, button: discord.ui.Button, interaction: discord.Interaction):
+        await interaction.response.defer()
+        self.index += 1
+        if self.index < len(self.receipts):
+            await self.send_current()
+        else:
+            await interaction.followup.send("✅ Validation terminée.", ephemeral=True)
+            self.stop()
+
+    @discord.ui.button(label="End", style=discord.ButtonStyle.secondary)
+    async def end(self, button: discord.ui.Button, interaction: discord.Interaction):
+        await interaction.response.send_message("❌ Validation interrompue.", ephemeral=True)
+        self.stop()
+
+
+@bot.tree.command(name="validation", description="Valider les reçus en attente (admin uniquement)")
+async def validation(interaction: discord.Interaction):
+    if not await is_admin(interaction.user.id):
+        await interaction.response.send_message("❌ Admin seulement.", ephemeral=True)
+        return
+
+    # fetch all pending receipts
+    async with bot.db.acquire() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "SELECT id, discord_id, amount, description, created_at "
+                "FROM factures WHERE state = 'pending' ORDER BY created_at ASC"
+            )
+            pending = await cur.fetchall()
+
+    if not pending:
+        await interaction.response.send_message("✅ Il n'y a pas de reçus en attente.", ephemeral=True)
+        return
+
+    view = ValidationView(interaction, pending)
+    await view.send_current()
 
 
 
