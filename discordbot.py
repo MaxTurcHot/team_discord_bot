@@ -343,13 +343,14 @@ async def recus_admin(interaction: discord.Interaction):
     if not await is_admin(interaction.user.id):
         await interaction.response.defer(ephemeral=True)
 
+    # Send quick interim message to avoid webhook timeout
+    await interaction.followup.send("⏳ Préparation du fichier des reçus, veuillez patienter...")
+
     async with bot.db.acquire() as conn:
         async with conn.cursor() as cur:
-            # Fetch all users
             await cur.execute("SELECT discord_id, first_name, last_name FROM users ORDER BY last_name, first_name")
             users = await cur.fetchall()
 
-            # Fetch all receipts
             await cur.execute("""
                 SELECT id, discord_id, amount, description, created_at, state
                 FROM factures
@@ -357,7 +358,6 @@ async def recus_admin(interaction: discord.Interaction):
             """)
             all_receipts = await cur.fetchall()
 
-    # Organize receipts by user
     receipt_map = {}
     for rid, uid, amt, desc, created, state in all_receipts:
         receipt_map.setdefault(uid, []).append((rid, amt, desc, created, state))
@@ -380,7 +380,7 @@ async def recus_admin(interaction: discord.Interaction):
             output.write("-" * 80 + "\n")
             for rid, amt, desc, created, state in receipts:
                 date_str = created.strftime("%Y-%m-%d")
-                desc = (desc[:32] + "..") if len(desc) > 34 else desc  # Truncate long desc
+                desc = (desc[:32] + "..") if len(desc) > 34 else desc
                 state_label = {
                     "pending": "🕐 En attente",
                     "accepted": "✅ Accepté",
@@ -393,12 +393,12 @@ async def recus_admin(interaction: discord.Interaction):
     output.write("\n" + "=" * 80 + "\n")
     output.write(f"🧾 Total général accepté: {total_global:.2f} $\n")
 
-    # Prepare file to send
+    # Prepare file
     output.seek(0)
-    file = discord.File(fp=io.BytesIO(output.getvalue().encode()), filename="reçus_admin.txt")
+    file = discord.File(fp=io.BytesIO(output.getvalue().encode()), filename="recus_admin.txt")
 
-    await interaction.followup.send(content="📄 Voici le résumé des reçus :", file=file)
-
+    # Now send the file after the small interim message
+    await interaction.followup.send(content="📄 Voici le fichier des reçus :", file=file)
 
 # -------------------------------
 # /update_tel - Update tel number
