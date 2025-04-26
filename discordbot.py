@@ -13,7 +13,11 @@ from dotenv import load_dotenv
 import io
 from discord import File, Embed, Interaction, ButtonStyle
 from discord.ui import View, button
+import logging
 
+# Set up logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 
 
@@ -440,66 +444,83 @@ async def build_embed_and_file(rec):
 
     return embed, file
 
+
 @bot.tree.command(name="validation", description="Valider les reçus en attente (admin seulement)")
 async def validation(interaction: Interaction):
-    if not await is_admin(interaction.user.id):
-        await interaction.response.send_message("❌ Admin seulement.")
-        return
+    logger.debug("Validation command invoked.")
+    try:
+        await interaction.response.defer()
+        logger.debug("Interaction deferred.")
+        # Your command logic here
+        if not await is_admin(interaction.user.id):
+            await interaction.response.send_message("❌ Admin seulement.")
+            return
 
-    # Immediately acknowledge correctly based on channel type
-    if interaction.guild is None:
-        # DM channel: No ephemeral allowed
-        await interaction.response.send_message("🔄 Chargement des reçus en attente dans ce message privé...")
-        response_func = interaction.followup.send
-        channel = interaction.channel
-    else:
-        # Server channel: ephemeral is fine
-        await interaction.response.defer(ephemeral=True)
-        response_func = interaction.followup.send
-        channel = interaction.channel
-
-    async with bot.db.acquire() as conn:
-        async with conn.cursor() as cur:
-            await cur.execute(
-                "SELECT id, discord_id, amount, description, created_at FROM factures WHERE state='pending' ORDER BY created_at"
-            )
-            pending = await cur.fetchall()
-
-    if not pending:
-        await response_func("✅ Aucun reçu en attente.")
-        return
-
-    for rec in pending:
-        rec_id = rec[0]
-        embed, file = await build_embed_and_file(rec)
-        view = ValidationView(rec_id)
-
-        message = await channel.send(embed=embed, file=file, view=view)
-
-        await view.wait()
-
-        if view.choice == "accepted" or view.choice == "refused":
-            async with bot.db.acquire() as conn:
-                async with conn.cursor() as cur:
-                    await cur.execute(
-                        "UPDATE factures SET state=%s WHERE id=%s",
-                        (view.choice, rec_id)
-                    )
-            await message.edit(content=f"✅ Reçu #{rec_id} **{view.choice.upper()}**", embed=None, attachments=[], view=None)
-
-        elif view.choice == "skip":
-            await message.edit(content=f"⏩ Reçu #{rec_id} ignoré (pour l'instant).", embed=None, attachments=[], view=None)
-            continue
-
-        elif view.choice == "end":
-            await message.edit(content=f"❌ Validation interrompue au reçu #{rec_id}.", embed=None, attachments=[], view=None)
-            break
-
+        # Immediately acknowledge correctly based on channel type
+        if interaction.guild is None:
+            # DM channel: No ephemeral allowed
+            await interaction.response.send_message("🔄 Chargement des reçus en attente dans ce message privé...")
+            response_func = interaction.followup.send
+            channel = interaction.channel
         else:
-            await message.edit(content=f"⏰ Timeout sur reçu #{rec_id}, validation arrêtée.", embed=None, attachments=[], view=None)
-            break
+            # Server channel: ephemeral is fine
+            await interaction.response.defer(ephemeral=True)
+            response_func = interaction.followup.send
+            channel = interaction.channel
 
-    await channel.send("🎉 Validation terminée.")
+        async with bot.db.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT id, discord_id, amount, description, created_at FROM factures WHERE state='pending' ORDER BY created_at"
+                )
+                pending = await cur.fetchall()
+
+        if not pending:
+            await response_func("✅ Aucun reçu en attente.")
+            return
+
+        for rec in pending:
+            rec_id = rec[0]
+            embed, file = await build_embed_and_file(rec)
+            view = ValidationView(rec_id)
+
+            message = await channel.send(embed=embed, file=file, view=view)
+
+            await view.wait()
+
+            if view.choice == "accepted" or view.choice == "refused":
+                async with bot.db.acquire() as conn:
+                    async with conn.cursor() as cur:
+                        await cur.execute(
+                            "UPDATE factures SET state=%s WHERE id=%s",
+                            (view.choice, rec_id)
+                        )
+                await message.edit(content=f"✅ Reçu #{rec_id} **{view.choice.upper()}**", embed=None, attachments=[],
+                                   view=None)
+
+            elif view.choice == "skip":
+                await message.edit(content=f"⏩ Reçu #{rec_id} ignoré (pour l'instant).", embed=None, attachments=[],
+                                   view=None)
+                continue
+
+            elif view.choice == "end":
+                await message.edit(content=f"❌ Validation interrompue au reçu #{rec_id}.", embed=None, attachments=[],
+                                   view=None)
+                break
+
+            else:
+                await message.edit(content=f"⏰ Timeout sur reçu #{rec_id}, validation arrêtée.", embed=None,
+                                   attachments=[], view=None)
+                break
+
+        await channel.send("🎉 Validation terminée.")
+        await interaction.followup.send("Processing complete.")
+        logger.debug("Follow-up message sent.")
+    except Exception as e:
+        logger.error(f"An error occurred: {e}")
+        await interaction.followup.send("An error occurred while processing your request.")
+
+
 
 # -------------------------------
 # Main entry point
