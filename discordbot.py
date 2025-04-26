@@ -231,23 +231,41 @@ async def contact(interaction: discord.Interaction):
     await interaction.response.send_message("\n".join(lines), ephemeral=True)
 
 # -------------------------------
-# /facture — Enter une facture
+# /recu — Enter a receipt with image
 # -------------------------------
-@bot.tree.command(description="Ajouter une facture")
-async def facture(interaction: discord.Interaction, amount: float, description: str):
+@bot.tree.command(name="recu", description="Ajouter un reçu avec image")
+async def recu(
+    interaction: discord.Interaction,
+    amount: float,
+    description: str,
+    image: discord.Attachment,
+):
+    """Store a receipt record with its image in the DB."""
+    # Download the attachment bytes
+    img_bytes = await image.read()
+
+    # Insert into DB (make sure your `factures` table has an `image_blob` BLOB column)
     async with bot.db.acquire() as conn:
         async with conn.cursor() as cur:
-            await cur.execute("""
-                INSERT INTO factures (discord_id, amount, description)
-                VALUES (%s, %s, %s)
-            """, (interaction.user.id, amount, description))
-    await interaction.response.send_message("✅ Facture ajoutée!", ephemeral=True)
+            await cur.execute(
+                """
+                INSERT INTO factures
+                  (discord_id, amount, description, image_blob, created_at)
+                VALUES (%s, %s, %s, %s, NOW())
+                """,
+                (interaction.user.id, amount, description, img_bytes)
+            )
+
+    await interaction.response.send_message(
+        "✅ Reçu enregistré avec image !", ephemeral=True
+    )
+
 
 # -------------------------------
-# /facture_info — Info sur toutes les factures
+# /recu_info — Info sur tous les recus
 # -------------------------------
-@bot.tree.command(description="Voir toutes tes factures")
-async def facture_info(interaction: discord.Interaction):
+@bot.tree.command(description="Voir tous tes reçus")
+async def recu_info(interaction: discord.Interaction):
     async with bot.db.acquire() as conn:
         async with conn.cursor() as cur:
             await cur.execute("""
@@ -264,10 +282,10 @@ async def facture_info(interaction: discord.Interaction):
             total = await cur.fetchone()
 
     if not rows:
-        await interaction.response.send_message("🧾 Aucune facture trouvée.", ephemeral=True)
+        await interaction.response.send_message("🧾 Aucun reçu trouvé.", ephemeral=True)
         return
 
-    lines = [f"🧾 **Factures de {interaction.user.display_name}**"]
+    lines = [f"🧾 **Reçus de {interaction.user.display_name}**"]
     for fid, amount, desc, created in rows:
         lines.append(f"`#{fid}` {created:%Y-%m-%d} - {desc}: {amount:.2f} $")
     lines.append(f"\n**Total dû**: `{total[0]:.2f} $`")
@@ -276,10 +294,10 @@ async def facture_info(interaction: discord.Interaction):
 
 
 # -------------------------------
-# /facture_enleve - Enleve une facture
+# /recu_enleve - Enleve un recu
 # -------------------------------
-@bot.tree.command(description="Supprimer une facture")
-async def facture_enleve(interaction: discord.Interaction, id: int):
+@bot.tree.command(description="Supprimer un reçu")
+async def recu_enleve(interaction: discord.Interaction, id: int):
     async with bot.db.acquire() as conn:
         async with conn.cursor() as cur:
             await cur.execute("""
@@ -287,16 +305,16 @@ async def facture_enleve(interaction: discord.Interaction, id: int):
                 WHERE id = %s AND discord_id = %s
             """, (id, interaction.user.id))
             if cur.rowcount == 0:
-                await interaction.response.send_message("❌ Facture introuvable ou non autorisée.", ephemeral=True)
+                await interaction.response.send_message("❌ Reçu introuvable ou non autorisé.", ephemeral=True)
                 return
 
-    await interaction.response.send_message("🗑️ Facture supprimée avec succès.", ephemeral=True)
+    await interaction.response.send_message("🗑️ Reçu supprimée avec succès.", ephemeral=True)
 
 # -------------------------------
-# /facture_admin - Voir toutes les factures
+# /recus_admin - Voir toutes les factures
 # -------------------------------
-@bot.tree.command(description="📋 Voir toutes les factures (admin seulement)")
-async def factures_admin(interaction: discord.Interaction):
+@bot.tree.command(description="📋 Voir tous les reçus (admin seulement)")
+async def recus_admin(interaction: discord.Interaction):
     if not await is_admin(interaction.user.id):
         await interaction.response.send_message("❌ Admin seulement.", ephemeral=True)
         return
@@ -316,7 +334,7 @@ async def factures_admin(interaction: discord.Interaction):
     for rid, uid, amt, desc, created in all_receipts:
         receipt_map.setdefault(uid, []).append((rid, amt, desc, created))
 
-    lines = ["🧾 **Résumé des factures par personne :**"]
+    lines = ["🧾 **Résumé des reçus par personne :**"]
     total_global = 0
 
     for discord_id, first, last in users:
@@ -330,7 +348,7 @@ async def factures_admin(interaction: discord.Interaction):
             for rid, amt, desc, created in receipts:
                 lines.append(f"  • `{created.strftime('%Y-%m-%d')}` - {desc}: `{amt:.2f} $`")
         else:
-            lines.append("  _Aucune facture._")
+            lines.append("  _Aucun reçu._")
 
     lines.append(f"\n🧾 **Total général: `{total_global:.2f} $`**")
     await interaction.response.send_message("\n".join(lines), ephemeral=True)
