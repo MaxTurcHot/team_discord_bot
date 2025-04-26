@@ -247,7 +247,7 @@ async def contact(interaction: discord.Interaction):
 # -------------------------------
 # /recu — Enter a receipt with image
 # -------------------------------
-@bot.tree.command(name="recu", description="Ajouter un reçu avec image")
+@bot.tree.command(name="recu", description="Ajouter un reçu avec succès")
 async def recu(
     interaction: discord.Interaction,
     amount: float,
@@ -334,6 +334,58 @@ async def recu_enleve(interaction: discord.Interaction, id: int):
                 return
 
     await interaction.response.send_message("🗑️ Reçu supprimée avec succès.", ephemeral=True)
+
+# -------------------------------
+# /recu_inspect — Inspect a receipt (owner or admin)
+# -------------------------------
+@bot.tree.command(name="recu_inspect", description="Inspecter un reçu avec image (propriétaire ou admin)")
+async def recu_inspect(interaction: discord.Interaction, id: int):
+    # 1) Récupérer le reçu
+    async with bot.db.acquire() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                """
+                SELECT id, discord_id, amount, description, created_at, state
+                FROM factures
+                WHERE id = %s
+                """,
+                (id,)
+            )
+            row = await cur.fetchone()
+
+    if not row:
+        await interaction.response.send_message("❌ Reçu introuvable.", ephemeral=True)
+        return
+
+    rec_id, owner_id, amount, description, created_at, state = row
+
+    # 2) Vérifier les permissions
+    if interaction.user.id != owner_id and not await is_admin(interaction.user.id):
+        await interaction.response.send_message(
+            "❌ Vous n'êtes pas autorisé à voir ce reçu.", ephemeral=True
+        )
+        return
+
+    # 3) Construire l'embed et récupérer l'image
+    embed, file = await build_embed_and_file((rec_id, owner_id, amount, description, created_at))
+
+    # Ajouter le champ État
+    state_labels = {
+        "pending": "🕐 En attente",
+        "accepted": "✅ Accepté",
+        "refused": "❌ Refusé"
+    }
+    embed.add_field(
+        name="État",
+        value=state_labels.get(state, "❓ Inconnu"),
+        inline=True
+    )
+
+    # 4) Envoyer le résultat
+    if file:
+        await interaction.response.send_message(embed=embed, file=file, ephemeral=True)
+    else:
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 # -------------------------------
