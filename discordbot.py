@@ -43,7 +43,10 @@ print("🔍 Socket exists:", os.path.exists(SOCKET))
 # Bot setup
 # -------------------------------
 intents = discord.Intents.default()
+intents.message_content = True
+intents.dm_messages = True  # <-- Essential to send and manage DMs
 bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
+
 
 # -------------------------------
 # Helper to see if user is admin
