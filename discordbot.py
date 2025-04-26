@@ -448,7 +448,7 @@ async def build_embed_and_file(rec):
 
     return embed, file
 
-@bot.tree.command(name="validation", description="Valider les reçus en attente (admin seulement)")
+@bot.tree.command(name="validation", description="Valider les reçus en attente (admin seulement, en DM seulement)")
 async def validation(interaction: Interaction):
     logger.debug("Validation command invoked.")
     try:
@@ -457,14 +457,18 @@ async def validation(interaction: Interaction):
             await interaction.response.send_message("❌ Admin seulement.", ephemeral=True)
             return
 
-        # Now defer once properly
-        await interaction.response.defer(thinking=True)
+        # ❗ FORBID usage in server channels
+        if interaction.guild is not None:
+            await interaction.response.send_message(
+                "🔒 Cette commande doit être utilisée en **message privé** (DM) avec le bot.",
+                ephemeral=True
+            )
+            return
 
-        # Decide where to send messages
-        if interaction.guild is None:
-            channel = interaction.channel  # DM channel
-        else:
-            channel = interaction.channel  # Server channel
+        # Now defer once properly (no ephemeral in DMs!)
+        await interaction.response.defer()
+
+        channel = interaction.channel  # DM channel guaranteed
 
         async with bot.db.acquire() as conn:
             async with conn.cursor() as cur:
@@ -507,16 +511,15 @@ async def validation(interaction: Interaction):
                 await message.edit(content=f"⏰ Timeout sur reçu #{rec_id}, validation arrêtée.", embed=None, attachments=[], view=None)
                 break
 
-        await interaction.followup.send("🎉 Validation terminée.", ephemeral=True)
+        await interaction.followup.send("🎉 Validation terminée.")
         logger.debug("Follow-up message sent.")
 
     except Exception as e:
         logger.error(f"An error occurred: {e}")
         try:
-            await interaction.followup.send("❌ Une erreur est survenue pendant la validation.", ephemeral=True)
+            await interaction.followup.send("❌ Une erreur est survenue pendant la validation.")
         except Exception as e2:
             logger.error(f"Even followup failed: {e2}")
-
 
 # -------------------------------
 # Main entry point
