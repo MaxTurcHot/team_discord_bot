@@ -10,6 +10,17 @@ import discord
 from discord.ext import commands
 import aiomysql
 from dotenv import load_dotenv
+import io
+from discord import File, Embed, Interaction, ButtonStyle
+from discord.ui import View, button
+import logging
+import decimal
+
+# Set up logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+
 
 # -------------------------------
 # Logging setup
@@ -39,7 +50,10 @@ print("🔍 Socket exists:", os.path.exists(SOCKET))
 # Bot setup
 # -------------------------------
 intents = discord.Intents.default()
+intents.message_content = True
+intents.dm_messages = True  # <-- Essential to send and manage DMs
 bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
+
 
 # -------------------------------
 # Helper to see if user is admin
@@ -231,55 +245,84 @@ async def contact(interaction: discord.Interaction):
     await interaction.response.send_message("\n".join(lines), ephemeral=True)
 
 # -------------------------------
-# /facture — Enter une facture
+# /recu — Enter a receipt with image
 # -------------------------------
-@bot.tree.command(description="Ajouter une facture")
-async def facture(interaction: discord.Interaction, amount: float, description: str):
+@bot.tree.command(name="recu", description="Ajouter un reçu avec succès")
+async def recu(
+    interaction: discord.Interaction,
+    amount: float,
+    description: str,
+    image: discord.Attachment,
+):
+    """Store a receipt record with its image in the DB."""
+    # Download the attachment bytes
+    img_bytes = await image.read()
+
+    # Insert into DB (make sure your `factures` table has an `image_blob` BLOB column)
     async with bot.db.acquire() as conn:
         async with conn.cursor() as cur:
-            await cur.execute("""
-                INSERT INTO factures (discord_id, amount, description)
-                VALUES (%s, %s, %s)
-            """, (interaction.user.id, amount, description))
-    await interaction.response.send_message("✅ Facture ajoutée!", ephemeral=True)
+            await cur.execute(
+                """
+                INSERT INTO factures
+                  (discord_id, amount, description, image_blob, created_at)
+                VALUES (%s, %s, %s, %s, NOW())
+                """,
+                (interaction.user.id, amount, description, img_bytes)
+            )
+
+    await interaction.response.send_message(
+        "✅ Reçu enregistré avec image !", ephemeral=True
+    )
+
 
 # -------------------------------
-# /facture_info — Info sur toutes les factures
+# /recu_info — Info sur tous les reçus
 # -------------------------------
-@bot.tree.command(description="Voir toutes tes factures")
-async def facture_info(interaction: discord.Interaction):
+@bot.tree.command(description="Voir tous tes reçus")
+async def recu_info(interaction: discord.Interaction):
     async with bot.db.acquire() as conn:
         async with conn.cursor() as cur:
+            # Fetch receipts with their state
             await cur.execute("""
-                SELECT id, amount, description, created_at
+                SELECT id, amount, description, created_at, state
                 FROM factures
                 WHERE discord_id = %s
                 ORDER BY created_at DESC
             """, (interaction.user.id,))
             rows = await cur.fetchall()
 
+            # Calculate total only for accepted receipts
             await cur.execute("""
-                SELECT SUM(amount) FROM factures WHERE discord_id = %s
+                SELECT SUM(amount) FROM factures
+                WHERE discord_id = %s AND state = 'accepted'
             """, (interaction.user.id,))
             total = await cur.fetchone()
 
     if not rows:
-        await interaction.response.send_message("🧾 Aucune facture trouvée.", ephemeral=True)
+        await interaction.response.send_message("🧾 Aucun reçu trouvé.", ephemeral=True)
         return
 
-    lines = [f"🧾 **Factures de {interaction.user.display_name}**"]
-    for fid, amount, desc, created in rows:
-        lines.append(f"`#{fid}` {created:%Y-%m-%d} - {desc}: {amount:.2f} $")
-    lines.append(f"\n**Total dû**: `{total[0]:.2f} $`")
+    lines = [f"🧾 **Reçus de {interaction.user.display_name}**"]
+    for fid, amount, desc, created, state in rows:
+        state_label = {
+            "pending": "🕐 Pending",
+            "accepted": "✅ Accepté",
+            "refused": "❌ Refusé"
+        }.get(state, "❓ Inconnu")
+
+        lines.append(f"`#{fid}` {created:%Y-%m-%d} - {desc}: {amount:.2f} $ [{state_label}]")
+
+    # Handle NULL total (if no accepted receipts)
+    total_amount = total[0] if total[0] is not None else 0.0
+    lines.append(f"\n**Total dû**: `{total_amount:.2f} $`")
 
     await interaction.response.send_message("\n".join(lines), ephemeral=True)
 
-
 # -------------------------------
-# /facture_enleve - Enleve une facture
+# /recu_enleve - Enleve un recu
 # -------------------------------
-@bot.tree.command(description="Supprimer une facture")
-async def facture_enleve(interaction: discord.Interaction, id: int):
+@bot.tree.command(description="Supprimer un reçu")
+async def recu_enleve(interaction: discord.Interaction, id: int):
     async with bot.db.acquire() as conn:
         async with conn.cursor() as cur:
             await cur.execute("""
@@ -287,53 +330,148 @@ async def facture_enleve(interaction: discord.Interaction, id: int):
                 WHERE id = %s AND discord_id = %s
             """, (id, interaction.user.id))
             if cur.rowcount == 0:
-                await interaction.response.send_message("❌ Facture introuvable ou non autorisée.", ephemeral=True)
+                await interaction.response.send_message("❌ Reçu introuvable ou non autorisé.", ephemeral=True)
                 return
 
-    await interaction.response.send_message("🗑️ Facture supprimée avec succès.", ephemeral=True)
+    await interaction.response.send_message("🗑️ Reçu supprimée avec succès.", ephemeral=True)
 
 # -------------------------------
-# /facture_admin - Voir toutes les factures
+# /recu_inspect — Inspect a receipt (owner or admin)
 # -------------------------------
-@bot.tree.command(description="📋 Voir toutes les factures (admin seulement)")
-async def factures_admin(interaction: discord.Interaction):
+@bot.tree.command(name="recu_inspect", description="Inspecter un reçu avec image (propriétaire ou admin)")
+async def recu_inspect(interaction: discord.Interaction, id: int):
+    # 1) Récupérer le reçu
+    async with bot.db.acquire() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                """
+                SELECT id, discord_id, amount, description, created_at, state
+                FROM factures
+                WHERE id = %s
+                """,
+                (id,)
+            )
+            row = await cur.fetchone()
+
+    if not row:
+        await interaction.response.send_message("❌ Reçu introuvable.", ephemeral=True)
+        return
+
+    rec_id, owner_id, amount, description, created_at, state = row
+
+    # 2) Vérifier les permissions
+    if interaction.user.id != owner_id and not await is_admin(interaction.user.id):
+        await interaction.response.send_message(
+            "❌ Vous n'êtes pas autorisé à voir ce reçu.", ephemeral=True
+        )
+        return
+
+    # 3) Construire l'embed et récupérer l'image
+    embed, file = await build_embed_and_file((rec_id, owner_id, amount, description, created_at))
+
+    # Ajouter le champ État
+    state_labels = {
+        "pending": "🕐 Pending",
+        "accepted": "✅ Accepté",
+        "refused": "❌ Refusé"
+    }
+    embed.add_field(
+        name="État",
+        value=state_labels.get(state, "❓ Inconnu"),
+        inline=True
+    )
+
+    # 4) Envoyer le résultat
+    if file:
+        await interaction.response.send_message(embed=embed, file=file, ephemeral=True)
+    else:
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+# -------------------------------
+# /recus_admin - Voir tous les reçus (admin seulement)
+# -------------------------------
+@bot.tree.command(description="📋 Voir tous les reçus (admin seulement)")
+async def recus_admin(interaction: discord.Interaction):
+    # 1) Admin check
     if not await is_admin(interaction.user.id):
         await interaction.response.send_message("❌ Admin seulement.", ephemeral=True)
         return
 
+    # 2) Immediate acknowledgement
+    await interaction.response.send_message(
+        "⏳ Préparation du rapport des reçus, veuillez patienter…",
+        ephemeral=True
+    )
+
+    # 3) Fetch users + receipts
     async with bot.db.acquire() as conn:
         async with conn.cursor() as cur:
-            # Fetch all users
-            await cur.execute("SELECT discord_id, first_name, last_name FROM users ORDER BY last_name, first_name")
+            await cur.execute(
+                "SELECT discord_id, first_name, last_name FROM users ORDER BY last_name, first_name"
+            )
             users = await cur.fetchall()
 
-            # Fetch all receipts
-            await cur.execute("SELECT id, discord_id, amount, description, created_at FROM factures ORDER BY created_at ASC")
+            await cur.execute("""
+                SELECT id, discord_id, amount, description, created_at, state
+                FROM factures
+                ORDER BY created_at ASC
+            """)
             all_receipts = await cur.fetchall()
 
-    # Organize receipts by user
-    receipt_map = {}
-    for rid, uid, amt, desc, created in all_receipts:
-        receipt_map.setdefault(uid, []).append((rid, amt, desc, created))
+    # 4) Organize receipts per user
+    receipt_map: dict[int, list] = {}
+    for rid, uid, amt, desc, created, state in all_receipts:
+        receipt_map.setdefault(uid, []).append((rid, amt, desc, created, state))
 
-    lines = ["🧾 **Résumé des factures par personne :**"]
-    total_global = 0
+    # 5) Build the report in-memory
+    buf = io.StringIO()
+    buf.write("🧾 Résumé des reçus par personne\n")
+    buf.write("=" * 80 + "\n\n")
+
+    total_global = decimal.Decimal("0")
 
     for discord_id, first, last in users:
-        receipts = receipt_map.get(discord_id, [])
-        total_user = sum(r[1] for r in receipts)
+        recs = receipt_map.get(discord_id, [])
+        # sum only accepted receipts (amt is Decimal)
+        total_user = sum(
+            (amount for (_id, amount, _desc, _created, state) in recs if state == "accepted"),
+            decimal.Decimal("0")
+        )
         total_global += total_user
 
-        lines.append(f"\n👤 **{first} {last}** — Total: `{total_user:.2f} $`")
-
-        if receipts:
-            for rid, amt, desc, created in receipts:
-                lines.append(f"  • `{created.strftime('%Y-%m-%d')}` - {desc}: `{amt:.2f} $`")
+        buf.write(f"👤 {first} {last} — Total accepté: {total_user:.2f} $\n")
+        buf.write("-" * 80 + "\n")
+        if recs:
+            buf.write(f"{'Id':<3}  {'Date':<12} {'Description':<35} {'Montant':>10} {'État':>15}\n")
+            buf.write("-" * 80 + "\n")
+            for rid, amt, desc, created, state in recs:
+                date = created.strftime("%Y-%m-%d")
+                desc_short = desc if len(desc) <= 34 else desc[:32] + ".."
+                emoji_state = {
+                    "pending": "🕐 Pending",
+                    "accepted": "✅ Accepté",
+                    "refused": "❌ Refusé"
+                }[state]
+                buf.write(f"#{rid:<3d} {date:<12} {desc_short:<35} {amt:>8.2f} {emoji_state:>15}\n")
         else:
-            lines.append("  _Aucune facture._")
+            buf.write("  _Aucun reçu._\n")
+        buf.write("\n")
 
-    lines.append(f"\n🧾 **Total général: `{total_global:.2f} $`**")
-    await interaction.response.send_message("\n".join(lines), ephemeral=True)
+    buf.write("=" * 80 + "\n")
+    buf.write(f"🧾 Total général: {total_global:.2f} $\n")
+    buf.seek(0)
+
+    # 6) Send the completed report as a file
+    file = discord.File(
+        io.BytesIO(buf.getvalue().encode("utf-8")),
+        filename="recus_admin.txt"
+    )
+    await interaction.followup.send(
+        content="📄 Voici le rapport complet des reçus :",
+        file=file,
+        ephemeral=True
+    )
 
 # -------------------------------
 # /update_tel - Update tel number
@@ -368,8 +506,143 @@ async def update_mail(interaction: discord.Interaction, mail: str):
         f"✅ Ton adresse email a été mise à jour: `{mail}`", ephemeral=True
     )
 
+class ValidationView(View):
+    def __init__(self, recu_id):
+        super().__init__(timeout=300)
+        self.choice = None
+        self.recu_id = recu_id
 
+    @button(label="Accepter", style=ButtonStyle.success)
+    async def accept(self, interaction: Interaction, button):
+        self.choice = "accepted"
+        await interaction.response.defer()
+        self.stop()
 
+    @button(label="Refuser", style=ButtonStyle.danger)
+    async def refuse(self, interaction: Interaction, button):
+        self.choice = "refused"
+        await interaction.response.defer()
+        self.stop()
+
+    @button(label="Skip", style=ButtonStyle.secondary)
+    async def skip(self, interaction: Interaction, button):
+        self.choice = "skip"
+        await interaction.response.defer()
+        self.stop()
+
+    @button(label="End", style=ButtonStyle.secondary)
+    async def end(self, interaction: Interaction, button):
+        self.choice = "end"
+        await interaction.response.defer()
+        self.stop()
+
+async def build_embed_and_file(rec):
+    rec_id, user_id, amount, description, created = rec
+    async with bot.db.acquire() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute("SELECT image_blob FROM factures WHERE id=%s", (rec_id,))
+            row = await cur.fetchone()
+
+    embed = Embed(title=f"Reçu #{rec_id}", description=description, timestamp=created)
+    embed.add_field(name="Montant", value=f"{amount:.2f} $", inline=True)
+    embed.add_field(name="Par", value=f"<@{user_id}>", inline=True)
+
+    file = None
+    if row and row[0]:
+        img_bytes = row[0]
+        file = File(io.BytesIO(img_bytes), filename=f"recu_{rec_id}.jpg")
+        embed.set_image(url=f"attachment://recu_{rec_id}.jpg")
+
+    return embed, file
+
+@bot.tree.command(name="validation", description="Valider les reçus en attente (admin seulement, en DM seulement)")
+async def validation(interaction: Interaction):
+    logger.debug("Validation command invoked.")
+    try:
+        # Check admin permission first
+        if not await is_admin(interaction.user.id):
+            await interaction.response.send_message("❌ Admin seulement.", ephemeral=True)
+            return
+
+        # ❗ FORBID usage in server channels
+        if interaction.guild is not None:
+            await interaction.response.send_message(
+                "🔒 Cette commande doit être utilisée en **message privé** (DM) avec le bot.",
+                ephemeral=True
+            )
+            return
+
+        # Now defer once properly (no ephemeral in DMs!)
+        await interaction.response.defer()
+
+        channel = interaction.channel  # DM channel guaranteed
+
+        async with bot.db.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT id, discord_id, amount, description, created_at FROM factures WHERE state='pending' ORDER BY created_at"
+                )
+                pending = await cur.fetchall()
+
+        if not pending:
+            await interaction.followup.send("✅ Aucun reçu en attente.")
+            return
+
+        for rec in pending:
+            rec_id = rec[0]
+            embed, file = await build_embed_and_file(rec)
+            view = ValidationView(rec_id)
+
+            message = await channel.send(embed=embed, file=file, view=view)
+
+            await view.wait()
+
+            if view.choice in ("accepted", "refused"):
+                # 1) Update the DB
+                async with bot.db.acquire() as conn:
+                    async with conn.cursor() as cur:
+                        await cur.execute(
+                            "UPDATE factures SET state=%s WHERE id=%s",
+                            (view.choice, rec_id)
+                        )
+
+                # 2) Notify the user who submitted the receipt
+                owner_id = rec[1]  # discord_id was the second field in your SELECT
+                try:
+                    user = await bot.fetch_user(owner_id)
+                    await user.send(
+                        f"🧾 Votre reçu **#{rec_id}** a été **{view.choice.upper()}**. Si vous croyez qu'il y a erreur, contactez un membre du CA."
+                    )
+                except Exception as e:
+                    logger.error(f"Impossible d'envoyer la notification à {owner_id}: {e}")
+
+                # 3) Edit the admin’s DM to reflect the change
+                await message.edit(
+                    content=f"✅ Reçu #{rec_id} **{view.choice.upper()}**",
+                    embed=None, attachments=[], view=None
+                )
+
+            elif view.choice == "skip":
+                await message.edit(content=f"⏩ Reçu #{rec_id} ignoré (pour l'instant).", embed=None, attachments=[], view=None)
+                continue
+
+            elif view.choice == "end":
+                await message.edit(content=f"❌ Validation interrompue au reçu #{rec_id}.", embed=None, attachments=[], view=None)
+                break
+
+            else:
+                await message.edit(content=f"⏰ Timeout sur reçu #{rec_id}, validation arrêtée.", embed=None, attachments=[], view=None)
+                break
+
+        await interaction.followup.send("🎉 Validation terminée.")
+        logger.debug("Follow-up message sent.")
+
+    except Exception as e:
+        logger.error(f"An error occurred: {e}")
+        try:
+            await interaction.followup.send("❌ Une erreur est survenue pendant la validation.")
+        except Exception as e2:
+            logger.error(f"Even followup failed: {e2}")
 
 # -------------------------------
 # Main entry point
