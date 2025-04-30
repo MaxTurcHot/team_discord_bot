@@ -554,13 +554,30 @@ async def build_embed_and_file(rec):
         embed.set_image(url=f"attachment://recu_{rec_id}.jpg")
 
     return embed, file
+
+
+
 # -------------------------------
 # /validation - Validate receipt - admin only
 # -------------------------------
-@bot.tree.command(name="validation", description="Valider les reçus en attente (admin seulement, en DM seulement)")
+@bot.tree.command(
+    name="validation",
+    description="Valider les reçus en attente (admin seulement, en DM seulement)"
+)
 async def validation(interaction: Interaction):
-    # ...[unchanged setup omitted for brevity]...
+    # ── 0) Admin check ──
+    if not await is_admin(interaction.user.id):
+        await interaction.response.send_message(
+            "❌ Admin seulement.", ephemeral=True
+        )
+        return
 
+    # ── 1) Defer and grab the DM channel ──
+    await interaction.response.defer()
+    # If this command was invoked in a guild, this will still open a DM:
+    channel = await interaction.user.create_dm()
+
+    # ── 2) Load pending receipts ──
     async with bot.db.acquire() as conn:
         async with conn.cursor() as cur:
             await cur.execute(
@@ -573,31 +590,34 @@ async def validation(interaction: Interaction):
         await interaction.followup.send("✅ Aucun reçu en attente.")
         return
 
+    # ── 3) Loop through each pending receipt ──
     for rec in pending:
         rec_id, owner_id, amount, description, created_at = rec
 
-        # ── 1) Prevent admin from validating their own receipt ──
+        # 3a) Prevent self‐validation
         if owner_id == interaction.user.id:
-            await channel.send(f"⚠️ Vous ne pouvez pas valider votre propre reçu #{rec_id}.")
+            await channel.send(
+                f"⚠️ Vous ne pouvez pas valider votre propre reçu #{rec_id}."
+            )
             continue
 
-        # ── 2) Show receipt embed + buttons ──
+        # 3b) Show the receipt + buttons
         embed, file = await build_embed_and_file(rec)
         view = ValidationView(rec_id)
         message = await channel.send(embed=embed, file=file, view=view)
 
         await view.wait()
 
+        # 3c) If accepted or refused, update state & approver
         if view.choice in ("accepted", "refused"):
-            # ── 3) Update state **and** approver ──
             async with bot.db.acquire() as conn:
                 async with conn.cursor() as cur:
                     await cur.execute(
                         """
                         UPDATE factures
-                           SET state = %s,
+                           SET state    = %s,
                                approver = %s
-                         WHERE id = %s
+                         WHERE id       = %s
                         """,
                         (view.choice, interaction.user.id, rec_id)
                     )
@@ -606,10 +626,11 @@ async def validation(interaction: Interaction):
             try:
                 user = await bot.fetch_user(owner_id)
                 await user.send(
-                    f"🧾 Votre reçu **#{rec_id}** a été **{view.choice.upper()}** par <@{interaction.user.id}>."
+                    f"🧾 Votre reçu **#{rec_id}** a été **"
+                    f"{view.choice.upper()}** par <@{interaction.user.id}>."
                 )
             except Exception as e:
-                logger.error(f"Impossible d'envoyer la notification à {owner_id}: {e}")
+                logger.error(f"Erreur en notifiant {owner_id}: {e}")
 
             # Edit the admin’s DM message
             await message.edit(
@@ -617,6 +638,7 @@ async def validation(interaction: Interaction):
                 embed=None, attachments=[], view=None
             )
 
+        # 3d) Skip just edits the message and continues
         elif view.choice == "skip":
             await message.edit(
                 content=f"⏩ Reçu #{rec_id} ignoré (pour l'instant).",
@@ -624,13 +646,13 @@ async def validation(interaction: Interaction):
             )
             continue
 
+        # 3e) End or timeout breaks out of the loop
         elif view.choice == "end":
             await message.edit(
                 content=f"❌ Validation interrompue au reçu #{rec_id}.",
                 embed=None, attachments=[], view=None
             )
             break
-
         else:
             await message.edit(
                 content=f"⏰ Timeout sur reçu #{rec_id}, validation arrêtée.",
@@ -638,9 +660,9 @@ async def validation(interaction: Interaction):
             )
             break
 
+    # ── 4) Final follow‐up in DM ──
     await interaction.followup.send("🎉 Validation terminée.")
-    logger.debug("Follow-up message sent.")
-
+    logger.debug("Validation command complete.")
 
 # -------------------------------
 # Main entry point
