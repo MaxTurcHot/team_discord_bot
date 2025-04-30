@@ -247,7 +247,7 @@ async def contact(interaction: discord.Interaction):
 # -------------------------------
 # /recu — Enter a receipt with image
 # -------------------------------
-@bot.tree.command(name="recu", description="Ajouter un reçu avec succès")
+@bot.tree.command(name="recu", description="Ajouter un reçu à son compte")
 async def recu(
     interaction: discord.Interaction,
     amount: float,
@@ -555,94 +555,114 @@ async def build_embed_and_file(rec):
 
     return embed, file
 
-@bot.tree.command(name="validation", description="Valider les reçus en attente (admin seulement, en DM seulement)")
+
+
+# -------------------------------
+# /validation - Validate receipt - admin only
+# -------------------------------
+@bot.tree.command(
+    name="validation",
+    description="Valider les reçus en attente (admin seulement, en DM seulement)"
+)
 async def validation(interaction: Interaction):
-    logger.debug("Validation command invoked.")
-    try:
-        # Check admin permission first
-        if not await is_admin(interaction.user.id):
-            await interaction.response.send_message("❌ Admin seulement.", ephemeral=True)
-            return
+    # ── 0) Admin check ──
+    if not await is_admin(interaction.user.id):
+        await interaction.response.send_message(
+            "❌ Admin seulement.", ephemeral=True
+        )
+        return
 
-        # ❗ FORBID usage in server channels
-        if interaction.guild is not None:
-            await interaction.response.send_message(
-                "🔒 Cette commande doit être utilisée en **message privé** (DM) avec le bot.",
-                ephemeral=True
+    # ── 1) Defer and grab the DM channel ──
+    await interaction.response.defer()
+    # If this command was invoked in a guild, this will still open a DM:
+    channel = await interaction.user.create_dm()
+
+    # ── 2) Load pending receipts ──
+    async with bot.db.acquire() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "SELECT id, discord_id, amount, description, created_at "
+                "FROM factures WHERE state='pending' ORDER BY created_at"
             )
-            return
+            pending = await cur.fetchall()
 
-        # Now defer once properly (no ephemeral in DMs!)
-        await interaction.response.defer()
+    if not pending:
+        await interaction.followup.send("✅ Aucun reçu en attente.")
+        return
 
-        channel = interaction.channel  # DM channel guaranteed
+    # ── 3) Loop through each pending receipt ──
+    for rec in pending:
+        rec_id, owner_id, amount, description, created_at = rec
 
-        async with bot.db.acquire() as conn:
-            async with conn.cursor() as cur:
-                await cur.execute(
-                    "SELECT id, discord_id, amount, description, created_at FROM factures WHERE state='pending' ORDER BY created_at"
-                )
-                pending = await cur.fetchall()
+        # 3a) Prevent self‐validation
+        if owner_id == interaction.user.id:
+            await channel.send(
+                f"⚠️ Vous ne pouvez pas valider votre propre reçu #{rec_id}."
+            )
+            continue
 
-        if not pending:
-            await interaction.followup.send("✅ Aucun reçu en attente.")
-            return
+        # 3b) Show the receipt + buttons
+        embed, file = await build_embed_and_file(rec)
+        view = ValidationView(rec_id)
+        message = await channel.send(embed=embed, file=file, view=view)
 
-        for rec in pending:
-            rec_id = rec[0]
-            embed, file = await build_embed_and_file(rec)
-            view = ValidationView(rec_id)
+        await view.wait()
 
-            message = await channel.send(embed=embed, file=file, view=view)
-
-            await view.wait()
-
-            if view.choice in ("accepted", "refused"):
-                # 1) Update the DB
-                async with bot.db.acquire() as conn:
-                    async with conn.cursor() as cur:
-                        await cur.execute(
-                            "UPDATE factures SET state=%s WHERE id=%s",
-                            (view.choice, rec_id)
-                        )
-
-                # 2) Notify the user who submitted the receipt
-                owner_id = rec[1]  # discord_id was the second field in your SELECT
-                try:
-                    user = await bot.fetch_user(owner_id)
-                    await user.send(
-                        f"🧾 Votre reçu **#{rec_id}** a été **{view.choice.upper()}**. Si vous croyez qu'il y a erreur, contactez un membre du CA."
+        # 3c) If accepted or refused, update state & approver
+        if view.choice in ("accepted", "refused"):
+            async with bot.db.acquire() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        """
+                        UPDATE factures
+                           SET state    = %s,
+                               approver = %s
+                         WHERE id       = %s
+                        """,
+                        (view.choice, interaction.user.id, rec_id)
                     )
-                except Exception as e:
-                    logger.error(f"Impossible d'envoyer la notification à {owner_id}: {e}")
 
-                # 3) Edit the admin’s DM to reflect the change
-                await message.edit(
-                    content=f"✅ Reçu #{rec_id} **{view.choice.upper()}**",
-                    embed=None, attachments=[], view=None
+            # Notify the owner
+            try:
+                user = await bot.fetch_user(owner_id)
+                await user.send(
+                    f"🧾 Votre reçu **#{rec_id}** a été **"
+                    f"{view.choice.upper()}** par <@{interaction.user.id}>."
                 )
+            except Exception as e:
+                logger.error(f"Erreur en notifiant {owner_id}: {e}")
 
-            elif view.choice == "skip":
-                await message.edit(content=f"⏩ Reçu #{rec_id} ignoré (pour l'instant).", embed=None, attachments=[], view=None)
-                continue
+            # Edit the admin’s DM message
+            await message.edit(
+                content=f"✅ Reçu #{rec_id} **{view.choice.upper()}**",
+                embed=None, attachments=[], view=None
+            )
 
-            elif view.choice == "end":
-                await message.edit(content=f"❌ Validation interrompue au reçu #{rec_id}.", embed=None, attachments=[], view=None)
-                break
+        # 3d) Skip just edits the message and continues
+        elif view.choice == "skip":
+            await message.edit(
+                content=f"⏩ Reçu #{rec_id} ignoré (pour l'instant).",
+                embed=None, attachments=[], view=None
+            )
+            continue
 
-            else:
-                await message.edit(content=f"⏰ Timeout sur reçu #{rec_id}, validation arrêtée.", embed=None, attachments=[], view=None)
-                break
+        # 3e) End or timeout breaks out of the loop
+        elif view.choice == "end":
+            await message.edit(
+                content=f"❌ Validation interrompue au reçu #{rec_id}.",
+                embed=None, attachments=[], view=None
+            )
+            break
+        else:
+            await message.edit(
+                content=f"⏰ Timeout sur reçu #{rec_id}, validation arrêtée.",
+                embed=None, attachments=[], view=None
+            )
+            break
 
-        await interaction.followup.send("🎉 Validation terminée.")
-        logger.debug("Follow-up message sent.")
-
-    except Exception as e:
-        logger.error(f"An error occurred: {e}")
-        try:
-            await interaction.followup.send("❌ Une erreur est survenue pendant la validation.")
-        except Exception as e2:
-            logger.error(f"Even followup failed: {e2}")
+    # ── 4) Final follow‐up in DM ──
+    await interaction.followup.send("🎉 Validation terminée.")
+    logger.debug("Validation command complete.")
 
 # -------------------------------
 # Main entry point
